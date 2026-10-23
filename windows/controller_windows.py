@@ -26,6 +26,11 @@ class Controller:
         self.use_bait = tk.BooleanVar(value=False)
         tk.Checkbutton(root, text="使用鱼饵（自动确认打窝）",
                        variable=self.use_bait).pack(padx=16, anchor="w", pady=(0, 6))
+        offset_row = tk.Frame(root)
+        offset_row.pack(padx=16, anchor="w", pady=(0, 8))
+        tk.Label(offset_row, text="浮标时机偏移 ms（正延后，负提前）").pack(side="left")
+        self.bobber_time_offset = tk.StringVar(value="0")
+        tk.Entry(offset_row, textvariable=self.bobber_time_offset, width=8, justify="right").pack(side="left", padx=(8, 0))
         self.button = tk.Button(root, text="启动钓鱼助手", width=24, command=self.toggle)
         self.button.pack(padx=16, pady=(0, 8))
         tk.Label(root, text="Windows 实验版：尚未验证", fg="#a33").pack(pady=(0, 12))
@@ -38,6 +43,9 @@ class Controller:
             self.status.set("正在停止…")
             return
         try:
+            offset_ms = float(self.bobber_time_offset.get().strip())
+            if abs(offset_ms) > 5000:
+                raise ValueError("偏移范围应为 -5000 到 5000 毫秒")
             LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
             self.log = LOG_PATH.open("a", encoding="utf-8", buffering=1)
             python = ROOT / ".venv" / "Scripts" / "python.exe"
@@ -45,6 +53,7 @@ class Controller:
                     "--no-bobber-jitter", "0.2", "--button-jitter", "20",
                     "--hold-min-ms", "50", "--hold-max-ms", "120",
                     "--bobber-cooldown", "0.3", "--bobber-loss-grace", "0.25",
+                    "--bobber-time-offset-ms", str(offset_ms),
                     "--input-latency", "0.045", "--max-size", "1920",
                     "--max-fps", "60", "--seconds", "3600"]
             if self.use_bait.get():

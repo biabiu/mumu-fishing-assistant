@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import Future, ThreadPoolExecutor
 import json
+import math
 import os
 import random
 import shutil
@@ -435,6 +436,8 @@ def main() -> int:
                         help="seconds to tolerate brief bobber detection gaps before no-bobber tapping")
     parser.add_argument("--input-latency", type=float, default=0.045,
                         help="estimated frame processing + input-to-game delay, seconds")
+    parser.add_argument("--bobber-time-offset-ms", type=float, default=0.0,
+                        help="bobber tap timing offset in milliseconds; positive delays, negative advances (default: 0)")
     parser.add_argument("--max-size", type=int, default=1920, help="scrcpy longest side; 1920 keeps native resolution")
     parser.add_argument("--max-fps", type=int, default=60, help="scrcpy video frame rate")
     parser.add_argument("--debug-every", type=float, default=0.5, help="seconds between diagnostic log lines")
@@ -445,11 +448,12 @@ def main() -> int:
             args.button_jitter < 0 or args.hold_min_ms <= 0 or
             args.hold_max_ms < args.hold_min_ms or args.bobber_cooldown <= 0 or
             args.bobber_jitter < 0 or min(args.reference_size) <= 0 or
+            not math.isfinite(args.bobber_time_offset_ms) or abs(args.bobber_time_offset_ms) > 5000 or
             args.bait_check_interval <= 0 or args.bait_use_interval <= 0 or
             args.bait_max_consecutive < 1 or
             args.button[0] < 0 or args.button[1] < 0 or
             args.button[0] >= args.reference_size[0] or args.button[1] >= args.reference_size[1]):
-        parser.error("intervals and canvas dimensions must be positive, jitter and offsets nonnegative, and the button must be within the reference canvas")
+        parser.error("intervals and canvas dimensions must be positive, jitters nonnegative, time offset within ±5000 ms, and the button within the reference canvas")
 
     args.adb = resolve_adb(args.adb)
     serial = get_device(args.adb, args.serial)
@@ -471,6 +475,7 @@ def main() -> int:
     start_pending = bool(args.start and args.use_bait)
     history: deque[tuple[float, float]] = deque(maxlen=7)
     last_marker_seen: float | None = None
+    marker_inside_since: float | None = None
     last_log = 0.0
     frames = 0
     frame_times: deque[float] = deque(maxlen=120)
@@ -620,6 +625,11 @@ def main() -> int:
                     low, high = gauge.left + args.margin, gauge.right - args.margin
                     x = gauge.marker_x
                     inside = low <= x <= high
+                    if inside:
+                        if marker_inside_since is None:
+                            marker_inside_since = now
+                    else:
+                        marker_inside_since = None
                     history.append((now, x))
                     velocity = 0.0
                     if len(history) >= 3:
@@ -635,17 +645,24 @@ def main() -> int:
                         entering_eta = (low - x) / velocity
                     elif velocity < 0.0 and x > high:
                         entering_eta = (high - x) / velocity
-                    # Inject early enough for the touch to reach the game at the
-                    # boundary; otherwise click on the first frame already inside.
-                    predicted_entry = entering_eta is not None and entering_eta <= args.input_latency + 1 / args.max_fps
+                    # Negative offsets advance the click relative to the current
+                    # prediction; positive offsets wait after the marker enters.
+                    lead_seconds = (args.input_latency + 1 / args.max_fps -
+                                    args.bobber_time_offset_ms / 1000.0)
+                    predicted_entry = (lead_seconds >= 0 and entering_eta is not None and
+                                       entering_eta <= lead_seconds)
+                    inside_delay_met = (args.bobber_time_offset_ms <= 0 or
+                                        (marker_inside_since is not None and
+                                         now - marker_inside_since >= args.bobber_time_offset_ms / 1000.0))
                     # Re-evaluate eligibility on every video frame. The cooldown
                     # gates touch dispatch only; it never pauses tracking or ETA updates.
-                    should_click = inside or predicted_entry
+                    should_click = (inside and inside_delay_met) or predicted_entry
                     if (bait_stage == "idle" and not bait_checking_now and not start_pending and should_click and
                             now >= next_click_allowed and ready_for_touch):
                         eta = 0.0 if inside else max(0.0, float(entering_eta or 0.0))
                         print(f"命中窗口：浮标 x={x:.1f}，v={velocity:+.0f}px/s，"
-                              f"黄色=[{low},{high}]，预计 {eta:.3f}s 后进入；点击", flush=True)
+                              f"黄色=[{low},{high}]，预计 {eta:.3f}s 后进入；"
+                              f"时机偏移={args.bobber_time_offset_ms:+.1f}ms；点击", flush=True)
                         tap_button(args.bobber_cooldown + random.uniform(0, args.bobber_jitter))
                     if now - last_log >= args.debug_every:
                         fps = (len(frame_times) - 1) / max(1e-6, frame_times[-1] - frame_times[0]) if len(frame_times) > 1 else 0
@@ -674,6 +691,7 @@ def main() -> int:
                         )
                         last_marker_seen = None
                         history.clear()
+                        marker_inside_since = None
                         if gauge is None:
                             yellow_history.clear()
 

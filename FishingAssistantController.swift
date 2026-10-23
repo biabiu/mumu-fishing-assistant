@@ -35,6 +35,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
             "settings.buttonJitter": 20,
             "settings.bobberCooldown": 0.3,
             "settings.bobberJitter": 0.05,
+            "settings.bobberTimeOffsetMs": 0.0,
             "settings.noBobberInterval": 1.0,
             "settings.noBobberJitter": 0.2,
             "settings.referenceWidth": 1080,
@@ -116,7 +117,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         let width: CGFloat = 380
-        let height: CGFloat = 550
+        let height: CGFloat = 590
         let window = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: width, height: height),
             styleMask: [.titled, .closable, .utilityWindow],
@@ -130,6 +131,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
             ("buttonJitter", "按钮位置随机偏移 ± 像素"),
             ("bobberCooldown", "浮标阶段最短冷却（秒）"),
             ("bobberJitter", "浮标阶段额外随机延时（秒）"),
+            ("bobberTimeOffsetMs", "浮标时机偏移（ms，正延后负提前）"),
             ("noBobberInterval", "非浮标阶段间隔（秒）"),
             ("noBobberJitter", "非浮标阶段随机抖动（±秒）"),
             ("referenceWidth", "参考画布宽度（像素）"),
@@ -199,6 +201,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let buttonJitter = integer("buttonJitter"), buttonJitter >= 0,
               let bobberCooldown = number("bobberCooldown"), bobberCooldown > 0,
               let bobberJitter = number("bobberJitter"), bobberJitter >= 0,
+              let bobberTimeOffsetMs = number("bobberTimeOffsetMs"), abs(bobberTimeOffsetMs) <= 5000,
               let noBobberInterval = number("noBobberInterval"), noBobberInterval > 0,
               let noBobberJitter = number("noBobberJitter"), noBobberJitter >= 0,
               noBobberJitter < noBobberInterval,
@@ -220,6 +223,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         defaults.set(buttonJitter, forKey: "settings.buttonJitter")
         defaults.set(bobberCooldown, forKey: "settings.bobberCooldown")
         defaults.set(bobberJitter, forKey: "settings.bobberJitter")
+        defaults.set(bobberTimeOffsetMs, forKey: "settings.bobberTimeOffsetMs")
         defaults.set(noBobberInterval, forKey: "settings.noBobberInterval")
         defaults.set(noBobberJitter, forKey: "settings.noBobberJitter")
         defaults.set(referenceWidth, forKey: "settings.referenceWidth")
@@ -262,6 +266,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
             "--hold-min-ms", "50", "--hold-max-ms", "120",
             "--bobber-cooldown", String(settings.double(forKey: "settings.bobberCooldown")),
             "--bobber-jitter", String(settings.double(forKey: "settings.bobberJitter")),
+            "--bobber-time-offset-ms", String(settings.double(forKey: "settings.bobberTimeOffsetMs")),
             "--bobber-loss-grace", "0.25", "--input-latency", "0.045",
             "--max-size", "1920", "--max-fps", "60", "--seconds", "3600"
         ]
