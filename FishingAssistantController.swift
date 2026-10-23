@@ -27,6 +27,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var settingsPanel: NSPanel?
     private var settingFields: [String: NSTextField] = [:]
     private var baitToggle: NSButton!
+    private var waitBaitCooldownCheckbox: NSButton!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -40,7 +41,11 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
             "settings.referenceHeight": 1920,
             "settings.buttonX": 540,
             "settings.buttonY": 1580,
-            "settings.useBait": false
+            "settings.useBait": false,
+            "settings.baitCheckInterval": 60.0,
+            "settings.baitMaxConsecutive": 4,
+            "settings.baitUseInterval": 3.0,
+            "settings.waitBaitCooldown": false
         ])
         buildWindow()
         refreshStatus()
@@ -81,7 +86,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         baitToggle = NSButton(checkboxWithTitle: "使用鱼饵", target: self, action: #selector(toggleBaitUsage(_:)))
         baitToggle.state = UserDefaults.standard.bool(forKey: "settings.useBait") ? .on : .off
-        baitToggle.toolTip = "识别到鱼饵图标时点击，冷却 2 秒；运行中的助手下次启动时读取新开关状态。"
+        baitToggle.toolTip = "识别鱼饵并确认打窝；打窝期间暂停钓鱼点击。运行中的助手下次启动时读取新状态。"
         baitToggle.frame = NSRect(x: 24, y: 59, width: 104, height: 22)
         content.addSubview(baitToggle)
 
@@ -111,7 +116,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         let width: CGFloat = 380
-        let height: CGFloat = 430
+        let height: CGFloat = 550
         let window = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: width, height: height),
             styleMask: [.titled, .closable, .utilityWindow],
@@ -130,7 +135,10 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
             ("referenceWidth", "参考画布宽度（像素）"),
             ("referenceHeight", "参考画布高度（像素）"),
             ("buttonX", "钓鱼按钮中心 X（像素）"),
-            ("buttonY", "钓鱼按钮中心 Y（像素）")
+            ("buttonY", "钓鱼按钮中心 Y（像素）"),
+            ("baitCheckInterval", "鱼饵检测冷却（秒）"),
+            ("baitMaxConsecutive", "每轮最多连续打窝次数"),
+            ("baitUseInterval", "连续打窝间隔（秒）")
         ]
         let defaults = UserDefaults.standard
         settingFields.removeAll()
@@ -147,7 +155,13 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
             settingFields[row.0] = field
         }
 
-        let note = NSTextField(labelWithString: "保存后下次启动生效；识别和点击均在本机完成。")
+        waitBaitCooldownCheckbox = NSButton(checkboxWithTitle: "等待冷却时间后再放鱼饵",
+                                            target: nil, action: nil)
+        waitBaitCooldownCheckbox.state = defaults.bool(forKey: "settings.waitBaitCooldown") ? .on : .off
+        waitBaitCooldownCheckbox.frame = NSRect(x: 20, y: 112, width: 340, height: 22)
+        content.addSubview(waitBaitCooldownCheckbox)
+
+        let note = NSTextField(labelWithString: "保存后下次启动生效；打窝确认期间暂停钓鱼点击。")
         note.font = .systemFont(ofSize: 11)
         note.textColor = .secondaryLabelColor
         note.frame = NSRect(x: 20, y: 68, width: 340, height: 18)
@@ -191,7 +205,10 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
               let referenceWidth = integer("referenceWidth"), referenceWidth >= 1,
               let referenceHeight = integer("referenceHeight"), referenceHeight >= 1,
               let buttonX = integer("buttonX"), buttonX >= 0, buttonX < referenceWidth,
-              let buttonY = integer("buttonY"), buttonY >= 0, buttonY < referenceHeight else {
+              let buttonY = integer("buttonY"), buttonY >= 0, buttonY < referenceHeight,
+              let baitCheckInterval = number("baitCheckInterval"), baitCheckInterval > 0,
+              let baitMaxConsecutive = integer("baitMaxConsecutive"), (1...20).contains(baitMaxConsecutive),
+              let baitUseInterval = number("baitUseInterval"), baitUseInterval > 0 else {
             let alert = NSAlert()
             alert.messageText = "设置值无效"
             alert.informativeText = "请填写有效的正数；按钮中心应位于参考画布范围内，非浮标抖动需小于间隔。"
@@ -209,6 +226,10 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         defaults.set(referenceHeight, forKey: "settings.referenceHeight")
         defaults.set(buttonX, forKey: "settings.buttonX")
         defaults.set(buttonY, forKey: "settings.buttonY")
+        defaults.set(baitCheckInterval, forKey: "settings.baitCheckInterval")
+        defaults.set(baitMaxConsecutive, forKey: "settings.baitMaxConsecutive")
+        defaults.set(baitUseInterval, forKey: "settings.baitUseInterval")
+        defaults.set(waitBaitCooldownCheckbox.state == .on, forKey: "settings.waitBaitCooldown")
         cancelSettings()
     }
 
@@ -245,7 +266,15 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
             "--max-size", "1920", "--max-fps", "60", "--seconds", "3600"
         ]
         if settings.bool(forKey: "settings.useBait") {
-            arguments += ["--use-bait", "--bait-cooldown", "2"]
+            arguments += [
+                "--use-bait",
+                "--bait-check-interval", String(settings.double(forKey: "settings.baitCheckInterval")),
+                "--bait-max-consecutive", String(settings.integer(forKey: "settings.baitMaxConsecutive")),
+                "--bait-use-interval", String(settings.double(forKey: "settings.baitUseInterval"))
+            ]
+            if settings.bool(forKey: "settings.waitBaitCooldown") {
+                arguments.append("--wait-bait-cooldown")
+            }
         }
         task.arguments = arguments
         try? FileManager.default.createDirectory(

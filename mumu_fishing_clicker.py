@@ -28,7 +28,9 @@ MUMU_PRO_ADB = "/Applications/MuMuPlayer Pro.app/Contents/MacOS/MuMu Android Dev
 MUMU_LEGACY_ADB = "/Applications/MuMuPlayer.app/Contents/MacOS/MuMuEmulator.app/Contents/MacOS/tools/adb"
 REFERENCE_W, REFERENCE_H = 1080, 1920
 BAIT_TEMPLATE_PATH = Path(__file__).resolve().parent / "assets" / "bait_icon_template.npy"
+BAIT_CONFIRM_TEMPLATE_PATH = Path(__file__).resolve().parent / "assets" / "bait_confirm_template.npy"
 _BAIT_TEMPLATE_BGR: np.ndarray | None = None
+_BAIT_CONFIRM_TEMPLATE_BGR: np.ndarray | None = None
 
 
 @dataclass
@@ -140,6 +142,86 @@ def detect_bait_icon(
 
     # Mean absolute BGR distance across a 8x8 signature tolerates compression.
     if best_center is None or best_error > 50:
+        return None
+    return best_center[0], best_center[1], best_error
+
+
+def detect_bait_confirm_button(
+    bgr: np.ndarray,
+) -> tuple[int, int, float] | None:
+    """Locate the green confirmation button in the bait dialog."""
+    global _BAIT_CONFIRM_TEMPLATE_BGR
+    if _BAIT_CONFIRM_TEMPLATE_BGR is None:
+        if not BAIT_CONFIRM_TEMPLATE_PATH.is_file():
+            return None
+        _BAIT_CONFIRM_TEMPLATE_BGR = np.load(
+            BAIT_CONFIRM_TEMPLATE_PATH, allow_pickle=False)[:, :, ::-1].copy()
+
+    stride = 4
+    image = bgr[::stride, ::stride]
+    blue, green, red = image[..., 0], image[..., 1], image[..., 2]
+    green_mask = ((green > 115) & (green > red * 1.14) &
+                  (green > blue * 1.10) & (blue < 185))
+    ys, xs = np.where(green_mask)
+    if not len(xs) or len(xs) > green_mask.size * 0.25:
+        return None
+
+    template = _BAIT_CONFIRM_TEMPLATE_BGR
+    tb, tg, tr = template[..., 0], template[..., 1], template[..., 2]
+    template_mask = ((tg > 115) & (tg > tr * 1.14) &
+                     (tg > tb * 1.10) & (tb < 185))
+    ty, tx = np.where(template_mask)
+    tx0, tx1, ty0, ty1 = int(tx.min()), int(tx.max()), int(ty.min()), int(ty.max())
+    sample_y = np.rint(np.linspace(3, template.shape[0] - 4, 8)).astype(int)
+    sample_x = np.rint(np.linspace(4, template.shape[1] - 5, 12)).astype(int)
+    sample_colors = template[np.ix_(sample_y, sample_x)].astype(np.int16)
+    image_h, image_w = green_mask.shape
+    visited = np.zeros(green_mask.shape, dtype=np.uint8)
+    best_error, best_center = float("inf"), None
+
+    for seed_y, seed_x in zip(ys.tolist(), xs.tolist()):
+        if visited[seed_y, seed_x]:
+            continue
+        visited[seed_y, seed_x] = 1
+        stack = [(seed_y, seed_x)]
+        min_x = max_x = seed_x
+        min_y = max_y = seed_y
+        area = 0
+        while stack:
+            cy, cx = stack.pop()
+            area += 1
+            min_x, max_x = min(min_x, cx), max(max_x, cx)
+            min_y, max_y = min(min_y, cy), max(max_y, cy)
+            for ny in range(max(0, cy - 1), min(image_h, cy + 2)):
+                for nx in range(max(0, cx - 1), min(image_w, cx + 2)):
+                    if green_mask[ny, nx] and not visited[ny, nx]:
+                        visited[ny, nx] = 1
+                        stack.append((ny, nx))
+
+        box_w, box_h = max_x - min_x + 1, max_y - min_y + 1
+        aspect = box_w / max(1, box_h)
+        if not (20 <= box_w <= image_w * 0.92 and 6 <= box_h <= image_h * 0.20 and
+                2.4 <= aspect <= 5.5 and area >= box_w * box_h * 0.25):
+            continue
+        center_x = (min_x + max_x) * stride / 2
+        center_y = (min_y + max_y) * stride / 2
+        if not (0.20 * bgr.shape[1] <= center_x <= 0.80 * bgr.shape[1] and
+                0.18 * bgr.shape[0] <= center_y <= 0.82 * bgr.shape[0]):
+            continue
+        scale_w = box_w * stride / max(1, tx1 - tx0 + 1)
+        scale_h = box_h * stride / max(1, ty1 - ty0 + 1)
+        scale = (scale_w + scale_h) / 2
+        px = np.rint(center_x + (sample_x - template.shape[1] / 2) * scale).astype(int)
+        py = np.rint(center_y + (sample_y - template.shape[0] / 2) * scale).astype(int)
+        if px.min() < 0 or py.min() < 0 or px.max() >= bgr.shape[1] or py.max() >= bgr.shape[0]:
+            continue
+        observed = bgr[np.ix_(py, px)].astype(np.int16)
+        error = float(np.abs(observed - sample_colors).mean())
+        if error < best_error:
+            best_error = error
+            best_center = (round(center_x), round(center_y))
+
+    if best_center is None or best_error > 62:
         return None
     return best_center[0], best_center[1], best_error
 
@@ -337,9 +419,16 @@ def main() -> int:
     parser.add_argument("--button-jitter", type=int, default=20,
                         help="random +/- tap offset in reference-screen pixels")
     parser.add_argument("--use-bait", action="store_true",
-                        help="automatically tap the bait icon when it is detected")
-    parser.add_argument("--bait-cooldown", type=float, default=2.0,
-                        help="minimum seconds between bait-icon taps")
+                        help="automatically use bait and confirm the green placement dialog")
+    parser.add_argument("--bait-check-interval", "--bait-cooldown", dest="bait_check_interval",
+                        type=float, default=60.0,
+                        help="seconds between bait inventory checks (default: 60)")
+    parser.add_argument("--bait-use-interval", type=float, default=3.0,
+                        help="seconds to wait between confirmed bait placements (default: 3)")
+    parser.add_argument("--bait-max-consecutive", type=int, default=4,
+                        help="maximum confirmed placements per round (default: 4)")
+    parser.add_argument("--wait-bait-cooldown", action="store_true",
+                        help="wait one bait-check interval before the first bait check")
     parser.add_argument("--hold-min-ms", type=float, default=50.0, help="minimum randomized touch duration")
     parser.add_argument("--hold-max-ms", type=float, default=120.0, help="maximum randomized touch duration")
     parser.add_argument("--bobber-loss-grace", type=float, default=0.25,
@@ -356,7 +445,8 @@ def main() -> int:
             args.button_jitter < 0 or args.hold_min_ms <= 0 or
             args.hold_max_ms < args.hold_min_ms or args.bobber_cooldown <= 0 or
             args.bobber_jitter < 0 or min(args.reference_size) <= 0 or
-            args.bait_cooldown <= 0 or
+            args.bait_check_interval <= 0 or args.bait_use_interval <= 0 or
+            args.bait_max_consecutive < 1 or
             args.button[0] < 0 or args.button[1] < 0 or
             args.button[0] >= args.reference_size[0] or args.button[1] >= args.reference_size[1]):
         parser.error("intervals and canvas dimensions must be positive, jitter and offsets nonnegative, and the button must be within the reference canvas")
@@ -381,9 +471,11 @@ def main() -> int:
     frames = 0
     frame_times: deque[float] = deque(maxlen=120)
     yellow_history: deque[np.ndarray] = deque(maxlen=max(12, round(args.max_fps * 0.50)))
-    last_bait_click = float("-inf")
-    next_bait_scan = float("-inf")
-    bait_position: tuple[int, int, float] | None = None
+    bait_stage = "idle"
+    bait_stage_started = started
+    bait_next_check = started + (args.bait_check_interval if args.wait_bait_cooldown else 0.0)
+    bait_next_scan = started
+    bait_round_count = 0
 
     try:
         with ScrcpyClient(config) as client, ThreadPoolExecutor(max_workers=1, thread_name_prefix="touch") as touch_worker:
@@ -412,6 +504,14 @@ def main() -> int:
                 print(f"点击参数：{x},{y}；按住 {hold_ms:.1f}ms；下次最早 {cooldown:.2f}s 后", flush=True)
                 return issued
 
+            def tap_detected_target(x: int, y: int) -> float:
+                nonlocal tap_future
+                hold_ms = random.uniform(args.hold_min_ms, args.hold_max_ms)
+                issued = time.monotonic()
+                tap_future = touch_worker.submit(client.tap, x, y, hold_seconds=hold_ms / 1000)
+                print(f"按住 {hold_ms:.1f}ms", flush=True)
+                return issued
+
             def touch_ready() -> bool:
                 nonlocal tap_future
                 if tap_future is None:
@@ -430,6 +530,10 @@ def main() -> int:
                 interval = periodic_interval()
                 last_click = tap_button(interval)
                 next_periodic_click = last_click + interval
+            if args.use_bait:
+                first_check = "等待冷却" if args.wait_bait_cooldown else "启动后立即检查"
+                print(f"鱼饵自动流程：{first_check}；检测间隔 {args.bait_check_interval:.0f}s，"
+                      f"每轮最多 {args.bait_max_consecutive} 次，打窝间隔 {args.bait_use_interval:.1f}s", flush=True)
 
             deadline = time.monotonic() + args.seconds
             for frame in client.frames(copy=False, timeout=5):
@@ -439,19 +543,60 @@ def main() -> int:
                 ready_for_touch = touch_ready()
                 frames += 1
                 frame_times.append(now)
-                if args.use_bait and now >= next_bait_scan:
-                    bait_position = detect_bait_icon(frame, args.reference_size)
-                    next_bait_scan = now + 0.25
-                if (args.use_bait and bait_position is not None and
-                        now - last_bait_click >= args.bait_cooldown and ready_for_touch):
-                    bait_x, bait_y, match_error = bait_position
-                    hold_ms = random.uniform(args.hold_min_ms, args.hold_max_ms)
-                    tap_future = touch_worker.submit(
-                        client.tap, bait_x, bait_y, hold_seconds=hold_ms / 1000)
-                    last_bait_click = now
-                    ready_for_touch = False
-                    print(f"识别到鱼饵图标：中心=({bait_x},{bait_y})，匹配误差={match_error:.1f}；"
-                          f"点击，冷却 {args.bait_cooldown:.1f}s，按住 {hold_ms:.1f}ms", flush=True)
+                if args.use_bait:
+                    if bait_stage == "idle" and now >= bait_next_check and ready_for_touch:
+                        bait_position = detect_bait_icon(frame, args.reference_size)
+                        if bait_position is None:
+                            bait_next_check = now + args.bait_check_interval
+                            print(f"本轮未检测到鱼饵；{args.bait_check_interval:.0f}s 后再检查", flush=True)
+                        else:
+                            bait_x, bait_y, match_error = bait_position
+                            tap_detected_target(bait_x, bait_y)
+                            bait_stage = "await_confirm"
+                            bait_stage_started = now
+                            bait_next_scan = now
+                            bait_round_count = 0
+                            ready_for_touch = False
+                            print(f"识别到鱼饵图标：中心=({bait_x},{bait_y})，匹配误差={match_error:.1f}；"
+                                  "点击打开打窝确认", flush=True)
+                    elif bait_stage == "await_confirm":
+                        if now - bait_stage_started >= 12.0:
+                            bait_stage = "idle"
+                            bait_next_check = now + args.bait_check_interval
+                            print("12s 内未识别到绿色打窝按钮；结束本轮鱼饵操作", flush=True)
+                        elif now >= bait_next_scan:
+                            confirm_position = detect_bait_confirm_button(frame)
+                            bait_next_scan = now + 0.10
+                            if confirm_position is not None and ready_for_touch:
+                                confirm_x, confirm_y, match_error = confirm_position
+                                tap_detected_target(confirm_x, confirm_y)
+                                bait_round_count += 1
+                                bait_stage = "pause_between_baits"
+                                bait_stage_started = now
+                                ready_for_touch = False
+                                print(f"识别到绿色打窝按钮：中心=({confirm_x},{confirm_y})，"
+                                      f"匹配误差={match_error:.1f}；确认第 {bait_round_count} 次", flush=True)
+                    elif bait_stage == "pause_between_baits" and now - bait_stage_started >= args.bait_use_interval:
+                        if bait_round_count >= args.bait_max_consecutive:
+                            bait_stage = "idle"
+                            bait_next_check = now + args.bait_check_interval
+                            print(f"本轮已连续打窝 {bait_round_count} 次；"
+                                  f"{args.bait_check_interval:.0f}s 后重新检查鱼饵", flush=True)
+                        else:
+                            bait_position = detect_bait_icon(frame, args.reference_size)
+                            if bait_position is None:
+                                bait_stage = "idle"
+                                bait_next_check = now + args.bait_check_interval
+                                print("鱼饵图标已消失；结束本轮打窝", flush=True)
+                            elif ready_for_touch:
+                                bait_x, bait_y, match_error = bait_position
+                                tap_detected_target(bait_x, bait_y)
+                                bait_stage = "await_confirm"
+                                bait_stage_started = now
+                                bait_next_scan = now
+                                ready_for_touch = False
+                                print(f"冷却 {args.bait_use_interval:.1f}s 后继续打窝；"
+                                      f"鱼饵中心=({bait_x},{bait_y})，匹配误差={match_error:.1f}", flush=True)
                 gauge = detect_gauge(frame, yellow_history, args.reference_size)
                 if gauge is not None and gauge.marker_x is not None:
                     last_marker_seen = now
@@ -479,7 +624,8 @@ def main() -> int:
                     # Re-evaluate eligibility on every video frame. The cooldown
                     # gates touch dispatch only; it never pauses tracking or ETA updates.
                     should_click = inside or predicted_entry
-                    if should_click and now >= next_click_allowed and ready_for_touch:
+                    if (bait_stage == "idle" and should_click and
+                            now >= next_click_allowed and ready_for_touch):
                         eta = 0.0 if inside else max(0.0, float(entering_eta or 0.0))
                         print(f"命中窗口：浮标 x={x:.1f}，v={velocity:+.0f}px/s，"
                               f"黄色=[{low},{high}]，预计 {eta:.3f}s 后进入；点击", flush=True)
@@ -514,7 +660,8 @@ def main() -> int:
                         if gauge is None:
                             yellow_history.clear()
 
-                    if args.start and now >= next_periodic_click and now >= next_click_allowed and ready_for_touch:
+                    if (bait_stage == "idle" and args.start and now >= next_periodic_click and
+                            now >= next_click_allowed and ready_for_touch):
                         print(f"未检测到浮标：按设定间隔拉钩点击，基准坐标 {tap_x},{tap_y}", flush=True)
                         interval = periodic_interval()
                         issued = tap_button(interval)

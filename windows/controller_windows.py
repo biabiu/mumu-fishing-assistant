@@ -24,7 +24,7 @@ class Controller:
         self.status = tk.StringVar(value="已停止")
         tk.Label(root, textvariable=self.status, padx=20, pady=12).pack()
         self.use_bait = tk.BooleanVar(value=False)
-        tk.Checkbutton(root, text="使用鱼饵（点击冷却 2 秒）",
+        tk.Checkbutton(root, text="使用鱼饵（自动确认打窝）",
                        variable=self.use_bait).pack(padx=16, anchor="w", pady=(0, 6))
         self.button = tk.Button(root, text="启动钓鱼助手", width=24, command=self.toggle)
         self.button.pack(padx=16, pady=(0, 8))
@@ -48,7 +48,7 @@ class Controller:
                     "--input-latency", "0.045", "--max-size", "1920",
                     "--max-fps", "60", "--seconds", "3600"]
             if self.use_bait.get():
-                args.extend(["--use-bait", "--bait-cooldown", "2"])
+                args.append("--use-bait")
             self.process = subprocess.Popen(args, cwd=ROOT, stdout=self.log,
                                             stderr=subprocess.STDOUT,
                                             creationflags=subprocess.CREATE_NO_WINDOW)
