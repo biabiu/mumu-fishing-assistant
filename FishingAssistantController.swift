@@ -23,9 +23,23 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var panel: NSPanel!
     private var statusLabel: NSTextField!
     private var toggleButton: NSButton!
+    private var settingsButton: NSButton!
+    private var settingsPanel: NSPanel?
+    private var settingFields: [String: NSTextField] = [:]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        UserDefaults.standard.register(defaults: [
+            "settings.buttonJitter": 20,
+            "settings.bobberCooldown": 0.3,
+            "settings.bobberJitter": 0.05,
+            "settings.noBobberInterval": 1.0,
+            "settings.noBobberJitter": 0.2,
+            "settings.referenceWidth": 1080,
+            "settings.referenceHeight": 1920,
+            "settings.buttonX": 540,
+            "settings.buttonY": 1580
+        ])
         buildWindow()
         refreshStatus()
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -37,7 +51,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func buildWindow() {
         panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 300, height: 156),
+            contentRect: NSRect(x: 0, y: 0, width: 340, height: 164),
             styleMask: [.titled, .closable, .utilityWindow],
             backing: .buffered,
             defer: false
@@ -50,24 +64,140 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.delegate = self
         panel.center()
 
-        let content = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 156))
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 164))
         statusLabel = NSTextField(labelWithString: "正在检查状态…")
         statusLabel.font = .systemFont(ofSize: 14, weight: .medium)
-        statusLabel.frame = NSRect(x: 24, y: 99, width: 252, height: 24)
+        statusLabel.frame = NSRect(x: 24, y: 112, width: 250, height: 24)
         content.addSubview(statusLabel)
+
+        settingsButton = NSButton(title: "⚙", target: self, action: #selector(showSettings))
+        settingsButton.isBordered = false
+        settingsButton.font = .systemFont(ofSize: 19)
+        settingsButton.toolTip = "钓鱼助手设置"
+        settingsButton.frame = NSRect(x: 288, y: 105, width: 32, height: 32)
+        content.addSubview(settingsButton)
 
         toggleButton = NSButton(title: "启动钓鱼助手", target: self, action: #selector(toggleAssistant))
         toggleButton.bezelStyle = .rounded
         toggleButton.controlSize = .large
-        toggleButton.frame = NSRect(x: 24, y: 48, width: 252, height: 38)
+        toggleButton.frame = NSRect(x: 24, y: 55, width: 292, height: 38)
         content.addSubview(toggleButton)
 
-        let hint = NSTextField(labelWithString: "窗口置顶；关闭窗口会隐藏控制器")
+        let hint = NSTextField(labelWithString: "窗口置顶；齿轮图标可调整识别和点击参数")
         hint.font = .systemFont(ofSize: 11)
         hint.textColor = .secondaryLabelColor
-        hint.frame = NSRect(x: 24, y: 18, width: 252, height: 18)
+        hint.frame = NSRect(x: 24, y: 22, width: 292, height: 18)
         content.addSubview(hint)
         panel.contentView = content
+    }
+
+    @objc private func showSettings() {
+        if let settingsPanel {
+            settingsPanel.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let width: CGFloat = 380
+        let height: CGFloat = 430
+        let window = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+            styleMask: [.titled, .closable, .utilityWindow],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "钓鱼助手设置"
+        window.level = .floating
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        let rows: [(String, String)] = [
+            ("buttonJitter", "按钮位置随机偏移 ± 像素"),
+            ("bobberCooldown", "浮标阶段最短冷却（秒）"),
+            ("bobberJitter", "浮标阶段额外随机延时（秒）"),
+            ("noBobberInterval", "非浮标阶段间隔（秒）"),
+            ("noBobberJitter", "非浮标阶段随机抖动（±秒）"),
+            ("referenceWidth", "参考画布宽度（像素）"),
+            ("referenceHeight", "参考画布高度（像素）"),
+            ("buttonX", "钓鱼按钮中心 X（像素）"),
+            ("buttonY", "钓鱼按钮中心 Y（像素）")
+        ]
+        let defaults = UserDefaults.standard
+        settingFields.removeAll()
+        for (index, row) in rows.enumerated() {
+            let y = height - 54 - CGFloat(index) * 32
+            let label = NSTextField(labelWithString: row.1)
+            label.frame = NSRect(x: 20, y: y, width: 238, height: 22)
+            content.addSubview(label)
+
+            let field = NSTextField(string: String(describing: defaults.object(forKey: "settings.\(row.0)") ?? ""))
+            field.alignment = .right
+            field.frame = NSRect(x: 264, y: y - 2, width: 96, height: 25)
+            content.addSubview(field)
+            settingFields[row.0] = field
+        }
+
+        let note = NSTextField(labelWithString: "保存后下次启动生效；浮标随机量只增加延时。")
+        note.font = .systemFont(ofSize: 11)
+        note.textColor = .secondaryLabelColor
+        note.frame = NSRect(x: 20, y: 68, width: 340, height: 18)
+        content.addSubview(note)
+
+        let cancel = NSButton(title: "取消", target: self, action: #selector(cancelSettings))
+        cancel.frame = NSRect(x: 190, y: 22, width: 76, height: 30)
+        content.addSubview(cancel)
+        let save = NSButton(title: "保存", target: self, action: #selector(saveSettings))
+        save.bezelStyle = .rounded
+        save.keyEquivalent = "\r"
+        save.frame = NSRect(x: 276, y: 22, width: 84, height: 30)
+        content.addSubview(save)
+        window.contentView = content
+        settingsPanel = window
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func cancelSettings() {
+        settingsPanel?.close()
+        settingsPanel = nil
+    }
+
+    @objc private func saveSettings() {
+        func number(_ key: String) -> Double? {
+            guard let text = settingFields[key]?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+            return Double(text)
+        }
+        func integer(_ key: String) -> Int? {
+            guard let text = settingFields[key]?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+            return Int(text)
+        }
+        guard let buttonJitter = integer("buttonJitter"), buttonJitter >= 0,
+              let bobberCooldown = number("bobberCooldown"), bobberCooldown > 0,
+              let bobberJitter = number("bobberJitter"), bobberJitter >= 0,
+              let noBobberInterval = number("noBobberInterval"), noBobberInterval > 0,
+              let noBobberJitter = number("noBobberJitter"), noBobberJitter >= 0,
+              noBobberJitter < noBobberInterval,
+              let referenceWidth = integer("referenceWidth"), referenceWidth >= 1,
+              let referenceHeight = integer("referenceHeight"), referenceHeight >= 1,
+              let buttonX = integer("buttonX"), buttonX >= 0, buttonX < referenceWidth,
+              let buttonY = integer("buttonY"), buttonY >= 0, buttonY < referenceHeight else {
+            let alert = NSAlert()
+            alert.messageText = "设置值无效"
+            alert.informativeText = "请填写有效的正数；按钮中心应位于参考画布范围内，非浮标抖动需小于间隔。"
+            alert.runModal()
+            return
+        }
+
+        let defaults = UserDefaults.standard
+        defaults.set(buttonJitter, forKey: "settings.buttonJitter")
+        defaults.set(bobberCooldown, forKey: "settings.bobberCooldown")
+        defaults.set(bobberJitter, forKey: "settings.bobberJitter")
+        defaults.set(noBobberInterval, forKey: "settings.noBobberInterval")
+        defaults.set(noBobberJitter, forKey: "settings.noBobberJitter")
+        defaults.set(referenceWidth, forKey: "settings.referenceWidth")
+        defaults.set(referenceHeight, forKey: "settings.referenceHeight")
+        defaults.set(buttonX, forKey: "settings.buttonX")
+        defaults.set(buttonY, forKey: "settings.buttonY")
+        cancelSettings()
     }
 
     @objc private func toggleAssistant() {
@@ -88,11 +218,17 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func startAssistant() {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: python)
+        let settings = UserDefaults.standard
         task.arguments = [
-            script, "--start", "--no-bobber-interval", "1", "--no-bobber-jitter", "0.2",
-            "--button-jitter", "20",
+            script, "--start",
+            "--no-bobber-interval", String(settings.double(forKey: "settings.noBobberInterval")),
+            "--no-bobber-jitter", String(settings.double(forKey: "settings.noBobberJitter")),
+            "--button", String(settings.integer(forKey: "settings.buttonX")), String(settings.integer(forKey: "settings.buttonY")),
+            "--reference-size", String(settings.integer(forKey: "settings.referenceWidth")), String(settings.integer(forKey: "settings.referenceHeight")),
+            "--button-jitter", String(settings.integer(forKey: "settings.buttonJitter")),
             "--hold-min-ms", "50", "--hold-max-ms", "120",
-            "--bobber-cooldown", "0.3",
+            "--bobber-cooldown", String(settings.double(forKey: "settings.bobberCooldown")),
+            "--bobber-jitter", String(settings.double(forKey: "settings.bobberJitter")),
             "--bobber-loss-grace", "0.25", "--input-latency", "0.045",
             "--max-size", "1920", "--max-fps", "60", "--seconds", "3600"
         ]

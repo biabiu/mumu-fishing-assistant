@@ -104,10 +104,15 @@ def get_device(adb: str, requested: str | None) -> str:
     raise RuntimeError("ADB 没发现在线设备。请确认 MuMu 已启动，并检查 adb connect 127.0.0.1:16384")
 
 
-def detect_gauge(bgr: np.ndarray, yellow_history: deque[np.ndarray] | None = None) -> Gauge | None:
+def detect_gauge(
+    bgr: np.ndarray,
+    yellow_history: deque[np.ndarray] | None = None,
+    reference_size: tuple[int, int] = (REFERENCE_W, REFERENCE_H),
+) -> Gauge | None:
     """Detect the yellow window and red bobber in the lower game HUD."""
     h, w, _ = bgr.shape
-    sx, sy = w / REFERENCE_W, h / REFERENCE_H
+    reference_w, reference_h = reference_size
+    sx, sy = w / reference_w, h / reference_h
     x0, x1 = int(235 * sx), int(850 * sx)
     y0, y1 = int(1285 * sy), int(1405 * sy)
     band = bgr[y0:y1, x0:x1]
@@ -211,10 +216,15 @@ def main() -> int:
                         help="symmetric random variation around no-bobber interval (default gives 0.8–1.2s)")
     parser.add_argument("--seconds", type=float, default=3600, help="maximum monitoring time")
     parser.add_argument("--button", nargs=2, type=int, default=(540, 1580), metavar=("X", "Y"),
-                        help="button center in 1080x1920 Android coordinates")
+                        help="button center in reference-screen pixels")
+    parser.add_argument("--reference-size", nargs=2, type=int, default=(1080, 1920),
+                        metavar=("WIDTH", "HEIGHT"),
+                        help="reference canvas size in Android pixels (default: 1080 1920)")
     parser.add_argument("--margin", type=int, default=2, help="shrink detected zone by this many stream pixels")
     parser.add_argument("--bobber-cooldown", type=float, default=0.3,
                         help="minimum seconds between eligible taps while the bobber is detected")
+    parser.add_argument("--bobber-jitter", type=float, default=0.05,
+                        help="random extra delay (0..N seconds) after bobber-phase minimum cooldown")
     parser.add_argument("--interval-jitter", type=float, default=None,
                         help=argparse.SUPPRESS)
     parser.add_argument("--button-jitter", type=int, default=20,
@@ -233,8 +243,11 @@ def main() -> int:
         args.no_bobber_jitter = args.interval_jitter
     if (args.no_bobber_interval <= 0 or args.no_bobber_jitter < 0 or
             args.button_jitter < 0 or args.hold_min_ms <= 0 or
-            args.hold_max_ms < args.hold_min_ms or args.bobber_cooldown <= 0):
-        parser.error("interval/jitter values must be valid, bobber cooldown positive, and hold duration must satisfy 0 < min <= max")
+            args.hold_max_ms < args.hold_min_ms or args.bobber_cooldown <= 0 or
+            args.bobber_jitter < 0 or min(args.reference_size) <= 0 or
+            args.button[0] < 0 or args.button[1] < 0 or
+            args.button[0] >= args.reference_size[0] or args.button[1] >= args.reference_size[1]):
+        parser.error("intervals and canvas dimensions must be positive, jitter and offsets nonnegative, and the button must be within the reference canvas")
 
     args.adb = resolve_adb(args.adb)
     serial = get_device(args.adb, args.serial)
@@ -261,8 +274,9 @@ def main() -> int:
         with ScrcpyClient(config) as client, ThreadPoolExecutor(max_workers=1, thread_name_prefix="touch") as touch_worker:
             first = client.wait_until_ready(timeout=10, copy=False)
             h, w = first.shape[:2]
-            tap_x = round(args.button[0] * w / REFERENCE_W)
-            tap_y = round(args.button[1] * h / REFERENCE_H)
+            reference_w, reference_h = args.reference_size
+            tap_x = round(args.button[0] * w / reference_w)
+            tap_y = round(args.button[1] * h / reference_h)
             print(f"视频流：{w}×{h}；按钮映射：{args.button[0]},{args.button[1]} → {tap_x},{tap_y}", flush=True)
 
             tap_future: Future | None = None
@@ -271,8 +285,8 @@ def main() -> int:
                 nonlocal last_click, next_click_allowed, tap_future
                 # Keep the tap close to the button center while avoiding a
                 # perfectly repeated coordinate and hold duration.
-                jitter_x = round(random.uniform(-args.button_jitter, args.button_jitter) * w / REFERENCE_W)
-                jitter_y = round(random.uniform(-args.button_jitter, args.button_jitter) * h / REFERENCE_H)
+                jitter_x = round(random.uniform(-args.button_jitter, args.button_jitter) * w / reference_w)
+                jitter_y = round(random.uniform(-args.button_jitter, args.button_jitter) * h / reference_h)
                 x = min(w - 1, max(0, tap_x + jitter_x))
                 y = min(h - 1, max(0, tap_y + jitter_y))
                 hold_ms = random.uniform(args.hold_min_ms, args.hold_max_ms)
@@ -310,7 +324,7 @@ def main() -> int:
                 ready_for_touch = touch_ready()
                 frames += 1
                 frame_times.append(now)
-                gauge = detect_gauge(frame, yellow_history)
+                gauge = detect_gauge(frame, yellow_history, args.reference_size)
                 if gauge is not None and gauge.marker_x is not None:
                     last_marker_seen = now
                     low, high = gauge.left + args.margin, gauge.right - args.margin
@@ -341,7 +355,7 @@ def main() -> int:
                         eta = 0.0 if inside else max(0.0, float(entering_eta or 0.0))
                         print(f"命中窗口：浮标 x={x:.1f}，v={velocity:+.0f}px/s，"
                               f"黄色=[{low},{high}]，预计 {eta:.3f}s 后进入；点击", flush=True)
-                        tap_button(args.bobber_cooldown)
+                        tap_button(args.bobber_cooldown + random.uniform(0, args.bobber_jitter))
                     if now - last_log >= args.debug_every:
                         fps = (len(frame_times) - 1) / max(1e-6, frame_times[-1] - frame_times[0]) if len(frame_times) > 1 else 0
                         print(f"识别：x={x:.1f}，方向={velocity:+.0f}px/s，黄色=[{gauge.left},{gauge.right}]，"
