@@ -465,6 +465,10 @@ def main() -> int:
         max(0.1, args.no_bobber_interval - args.no_bobber_jitter),
         args.no_bobber_interval + args.no_bobber_jitter)
     next_periodic_click = started + periodic_interval()
+    # When bait automation is enabled, defer the initial fishing tap until the
+    # first bait scan (and any bait-confirmation cycle) has finished. Without
+    # bait automation the initial tap is sent synchronously below.
+    start_pending = bool(args.start and args.use_bait)
     history: deque[tuple[float, float]] = deque(maxlen=7)
     last_marker_seen: float | None = None
     last_log = 0.0
@@ -476,6 +480,7 @@ def main() -> int:
     bait_next_check = started + (args.bait_check_interval if args.wait_bait_cooldown else 0.0)
     bait_next_scan = started
     bait_round_count = 0
+    first_bait_check_complete = not args.use_bait
 
     try:
         with ScrcpyClient(config) as client, ThreadPoolExecutor(max_workers=1, thread_name_prefix="touch") as touch_worker:
@@ -525,13 +530,15 @@ def main() -> int:
                 tap_future = None
                 return True
 
-            if args.start:
+            if args.start and not args.use_bait:
                 print("启动钓鱼：点击", flush=True)
                 interval = periodic_interval()
                 last_click = tap_button(interval)
                 next_periodic_click = last_click + interval
             if args.use_bait:
                 first_check = "等待冷却" if args.wait_bait_cooldown else "启动后立即检查"
+                if args.start:
+                    print("已暂缓启动钓鱼按钮，等待首次鱼饵检查/打窝完成", flush=True)
                 print(f"鱼饵自动流程：{first_check}；检测间隔 {args.bait_check_interval:.0f}s，"
                       f"每轮最多 {args.bait_max_consecutive} 次，打窝间隔 {args.bait_use_interval:.1f}s", flush=True)
 
@@ -543,9 +550,12 @@ def main() -> int:
                 ready_for_touch = touch_ready()
                 frames += 1
                 frame_times.append(now)
+                bait_checking_now = False
                 if args.use_bait:
                     if bait_stage == "idle" and now >= bait_next_check and ready_for_touch:
+                        bait_checking_now = True
                         bait_position = detect_bait_icon(frame, args.reference_size)
+                        first_bait_check_complete = True
                         if bait_position is None:
                             bait_next_check = now + args.bait_check_interval
                             print(f"本轮未检测到鱼饵；{args.bait_check_interval:.0f}s 后再检查", flush=True)
@@ -598,6 +608,13 @@ def main() -> int:
                                 print(f"冷却 {args.bait_use_interval:.1f}s 后继续打窝；"
                                       f"鱼饵中心=({bait_x},{bait_y})，匹配误差={match_error:.1f}", flush=True)
                 gauge = detect_gauge(frame, yellow_history, args.reference_size)
+                if (start_pending and bait_stage == "idle" and first_bait_check_complete and
+                        not bait_checking_now and ready_for_touch):
+                    print("首次鱼饵检查/打窝完成：启动钓鱼", flush=True)
+                    interval = periodic_interval()
+                    last_click = tap_button(interval)
+                    next_periodic_click = last_click + interval
+                    start_pending = False
                 if gauge is not None and gauge.marker_x is not None:
                     last_marker_seen = now
                     low, high = gauge.left + args.margin, gauge.right - args.margin
@@ -624,7 +641,7 @@ def main() -> int:
                     # Re-evaluate eligibility on every video frame. The cooldown
                     # gates touch dispatch only; it never pauses tracking or ETA updates.
                     should_click = inside or predicted_entry
-                    if (bait_stage == "idle" and should_click and
+                    if (bait_stage == "idle" and not bait_checking_now and not start_pending and should_click and
                             now >= next_click_allowed and ready_for_touch):
                         eta = 0.0 if inside else max(0.0, float(entering_eta or 0.0))
                         print(f"命中窗口：浮标 x={x:.1f}，v={velocity:+.0f}px/s，"
@@ -660,7 +677,8 @@ def main() -> int:
                         if gauge is None:
                             yellow_history.clear()
 
-                    if (bait_stage == "idle" and args.start and now >= next_periodic_click and
+                    if (bait_stage == "idle" and not bait_checking_now and not start_pending and
+                            args.start and now >= next_periodic_click and
                             now >= next_click_allowed and ready_for_touch):
                         print(f"未检测到浮标：按设定间隔拉钩点击，基准坐标 {tap_x},{tap_y}", flush=True)
                         interval = periodic_interval()
