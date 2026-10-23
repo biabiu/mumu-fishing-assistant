@@ -27,6 +27,8 @@ ADB_DEFAULT = None
 MUMU_PRO_ADB = "/Applications/MuMuPlayer Pro.app/Contents/MacOS/MuMu Android Device.app/Contents/MacOS/tools/adb"
 MUMU_LEGACY_ADB = "/Applications/MuMuPlayer.app/Contents/MacOS/MuMuEmulator.app/Contents/MacOS/tools/adb"
 REFERENCE_W, REFERENCE_H = 1080, 1920
+BAIT_TEMPLATE_PATH = Path(__file__).resolve().parent / "assets" / "bait_icon_template.npy"
+_BAIT_TEMPLATE_BGR: np.ndarray | None = None
 
 
 @dataclass
@@ -35,6 +37,111 @@ class Gauge:
     right: int
     y: int
     marker_x: float | None
+
+
+def detect_bait_icon(
+    bgr: np.ndarray,
+    reference_size: tuple[int, int] = (REFERENCE_W, REFERENCE_H),
+) -> tuple[int, int, float] | None:
+    """Find warm bag-shaped components, then verify them against the icon template."""
+    global _BAIT_TEMPLATE_BGR
+    if _BAIT_TEMPLATE_BGR is None:
+        if not BAIT_TEMPLATE_PATH.is_file():
+            return None
+        # The stored template is RGB; scrcpy frames are BGR.
+        _BAIT_TEMPLATE_BGR = np.load(BAIT_TEMPLATE_PATH, allow_pickle=False)[:, :, ::-1].copy()
+
+    h, w = bgr.shape[:2]
+    reference_w, reference_h = reference_size
+    base_scale = min(w / reference_w, h / reference_h)
+    scan_stride = 4
+    image = bgr[::scan_stride, ::scan_stride]
+    blue, green, red = image[..., 0], image[..., 1], image[..., 2]
+    warm = ((red > 145) & (green > 25) & (green < 205) &
+            (red > green * 1.10) & (red > blue * 1.20))
+    # A broad red wash or diagnostic test pattern is not a UI icon; avoid
+    # spending component-labeling time on a mostly uniform warm-color frame.
+    if np.count_nonzero(warm) > warm.size * 0.12:
+        return None
+    cyan = ((blue > 115) & (green > 75) & (red < 165) &
+            (blue > red * 1.25) & (green > red * 1.12))
+    warm_ys, warm_xs = np.where(warm)
+    if not len(warm_xs):
+        return None
+
+    template = _BAIT_TEMPLATE_BGR
+    template_red = template[..., 2]
+    template_green = template[..., 1]
+    template_blue = template[..., 0]
+    template_warm = ((template_red > 145) & (template_green > 25) &
+                     (template_green < 205) & (template_red > template_green * 1.10) &
+                     (template_red > template_blue * 1.20))
+    template_y, template_x = np.where(template_warm)
+    tx0, tx1 = int(template_x.min()), int(template_x.max())
+    ty0, ty1 = int(template_y.min()), int(template_y.max())
+
+    # Connected components are built on a 4x reduced color mask, then the
+    # icon template is checked only around plausible bag-shaped candidates.
+    visited = np.zeros(warm.shape, dtype=np.uint8)
+    image_h, image_w = warm.shape
+    scale_from_w = scan_stride / max(1, tx1 - tx0 + 1)
+    scale_from_h = scan_stride / max(1, ty1 - ty0 + 1)
+    sample_y = np.rint(np.linspace(3, template.shape[0] - 4, 8)).astype(int)
+    sample_x = np.rint(np.linspace(3, template.shape[1] - 4, 8)).astype(int)
+    sample_colors = template[np.ix_(sample_y, sample_x)].astype(np.int16)
+    best_error, best_center = float("inf"), None
+    for seed_y, seed_x in zip(warm_ys.tolist(), warm_xs.tolist()):
+        if visited[seed_y, seed_x]:
+            continue
+        visited[seed_y, seed_x] = 1
+        stack = [(seed_y, seed_x)]
+        min_x = max_x = seed_x
+        min_y = max_y = seed_y
+        area = 0
+        while stack:
+            cy, cx = stack.pop()
+            area += 1
+            min_x, max_x = min(min_x, cx), max(max_x, cx)
+            min_y, max_y = min(min_y, cy), max(max_y, cy)
+            for ny in range(max(0, cy - 1), min(image_h, cy + 2)):
+                for nx in range(max(0, cx - 1), min(image_w, cx + 2)):
+                    if warm[ny, nx] and not visited[ny, nx]:
+                        visited[ny, nx] = 1
+                        stack.append((ny, nx))
+
+        box_w, box_h = max_x - min_x + 1, max_y - min_y + 1
+        if not (10 <= box_w <= 50 and 10 <= box_h <= 50 and 0.70 <= box_w / box_h <= 1.35):
+            continue
+        if not 35 <= area <= 900:
+            continue
+
+        # A cyan/yellow emblem sits in the lower-middle of this bait bag.
+        bx0, bx1 = max(0, min_x + int(box_w * 0.28)), min(image_w, max_x - int(box_w * 0.08) + 1)
+        by0, by1 = max(0, min_y + int(box_h * 0.42)), min(image_h, max_y + 1)
+        if bx1 <= bx0 or by1 <= by0 or int(cyan[by0:by1, bx0:bx1].sum()) < 5:
+            continue
+
+        center_x = (min_x + max_x) * scan_stride / 2
+        center_y = (min_y + max_y) * scan_stride / 2
+        estimated_scale = ((box_w * scale_from_w) + (box_h * scale_from_h)) / 2
+        estimated_scale = max(base_scale * 0.55, min(base_scale * 1.65, estimated_scale))
+        for relative_scale in (0.88, 1.0, 1.12):
+            scale = estimated_scale * relative_scale
+            px = np.rint(center_x + (sample_x - template.shape[1] / 2) * scale).astype(int)
+            py = np.rint(center_y + (sample_y - template.shape[0] / 2) * scale).astype(int)
+            if px.min() < 0 or py.min() < 0 or px.max() >= w or py.max() >= h:
+                continue
+            observed = bgr[np.ix_(py, px)].astype(np.int16)
+            error = float(np.abs(observed - sample_colors).mean())
+            if error < best_error:
+                best_error = error
+                # The warm-mask bbox center tracks the clickable bag body.
+                best_center = (round(center_x), round(center_y))
+
+    # Mean absolute BGR distance across a 8x8 signature tolerates compression.
+    if best_center is None or best_error > 50:
+        return None
+    return best_center[0], best_center[1], best_error
 
 
 def resolve_adb(requested: str | None) -> str:
@@ -229,6 +336,10 @@ def main() -> int:
                         help=argparse.SUPPRESS)
     parser.add_argument("--button-jitter", type=int, default=20,
                         help="random +/- tap offset in reference-screen pixels")
+    parser.add_argument("--use-bait", action="store_true",
+                        help="automatically tap the bait icon when it is detected")
+    parser.add_argument("--bait-cooldown", type=float, default=2.0,
+                        help="minimum seconds between bait-icon taps")
     parser.add_argument("--hold-min-ms", type=float, default=50.0, help="minimum randomized touch duration")
     parser.add_argument("--hold-max-ms", type=float, default=120.0, help="maximum randomized touch duration")
     parser.add_argument("--bobber-loss-grace", type=float, default=0.25,
@@ -245,6 +356,7 @@ def main() -> int:
             args.button_jitter < 0 or args.hold_min_ms <= 0 or
             args.hold_max_ms < args.hold_min_ms or args.bobber_cooldown <= 0 or
             args.bobber_jitter < 0 or min(args.reference_size) <= 0 or
+            args.bait_cooldown <= 0 or
             args.button[0] < 0 or args.button[1] < 0 or
             args.button[0] >= args.reference_size[0] or args.button[1] >= args.reference_size[1]):
         parser.error("intervals and canvas dimensions must be positive, jitter and offsets nonnegative, and the button must be within the reference canvas")
@@ -269,6 +381,9 @@ def main() -> int:
     frames = 0
     frame_times: deque[float] = deque(maxlen=120)
     yellow_history: deque[np.ndarray] = deque(maxlen=max(12, round(args.max_fps * 0.50)))
+    last_bait_click = float("-inf")
+    next_bait_scan = float("-inf")
+    bait_position: tuple[int, int, float] | None = None
 
     try:
         with ScrcpyClient(config) as client, ThreadPoolExecutor(max_workers=1, thread_name_prefix="touch") as touch_worker:
@@ -324,6 +439,19 @@ def main() -> int:
                 ready_for_touch = touch_ready()
                 frames += 1
                 frame_times.append(now)
+                if args.use_bait and now >= next_bait_scan:
+                    bait_position = detect_bait_icon(frame, args.reference_size)
+                    next_bait_scan = now + 0.25
+                if (args.use_bait and bait_position is not None and
+                        now - last_bait_click >= args.bait_cooldown and ready_for_touch):
+                    bait_x, bait_y, match_error = bait_position
+                    hold_ms = random.uniform(args.hold_min_ms, args.hold_max_ms)
+                    tap_future = touch_worker.submit(
+                        client.tap, bait_x, bait_y, hold_seconds=hold_ms / 1000)
+                    last_bait_click = now
+                    ready_for_touch = False
+                    print(f"识别到鱼饵图标：中心=({bait_x},{bait_y})，匹配误差={match_error:.1f}；"
+                          f"点击，冷却 {args.bait_cooldown:.1f}s，按住 {hold_ms:.1f}ms", flush=True)
                 gauge = detect_gauge(frame, yellow_history, args.reference_size)
                 if gauge is not None and gauge.marker_x is not None:
                     last_marker_seen = now

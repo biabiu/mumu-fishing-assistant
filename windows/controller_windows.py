@@ -23,6 +23,9 @@ class Controller:
         root.resizable(False, False)
         self.status = tk.StringVar(value="已停止")
         tk.Label(root, textvariable=self.status, padx=20, pady=12).pack()
+        self.use_bait = tk.BooleanVar(value=False)
+        tk.Checkbutton(root, text="使用鱼饵（点击冷却 2 秒）",
+                       variable=self.use_bait).pack(padx=16, anchor="w", pady=(0, 6))
         self.button = tk.Button(root, text="启动钓鱼助手", width=24, command=self.toggle)
         self.button.pack(padx=16, pady=(0, 8))
         tk.Label(root, text="Windows 实验版：尚未验证", fg="#a33").pack(pady=(0, 12))
@@ -44,6 +47,8 @@ class Controller:
                     "--bobber-cooldown", "0.3", "--bobber-loss-grace", "0.25",
                     "--input-latency", "0.045", "--max-size", "1920",
                     "--max-fps", "60", "--seconds", "3600"]
+            if self.use_bait.get():
+                args.extend(["--use-bait", "--bait-cooldown", "2"])
             self.process = subprocess.Popen(args, cwd=ROOT, stdout=self.log,
                                             stderr=subprocess.STDOUT,
                                             creationflags=subprocess.CREATE_NO_WINDOW)

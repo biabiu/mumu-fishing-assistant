@@ -26,6 +26,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var settingsButton: NSButton!
     private var settingsPanel: NSPanel?
     private var settingFields: [String: NSTextField] = [:]
+    private var baitToggle: NSButton!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -38,7 +39,8 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
             "settings.referenceWidth": 1080,
             "settings.referenceHeight": 1920,
             "settings.buttonX": 540,
-            "settings.buttonY": 1580
+            "settings.buttonY": 1580,
+            "settings.useBait": false
         ])
         buildWindow()
         refreshStatus()
@@ -77,18 +79,28 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         settingsButton.frame = NSRect(x: 288, y: 105, width: 32, height: 32)
         content.addSubview(settingsButton)
 
+        baitToggle = NSButton(checkboxWithTitle: "使用鱼饵", target: self, action: #selector(toggleBaitUsage(_:)))
+        baitToggle.state = UserDefaults.standard.bool(forKey: "settings.useBait") ? .on : .off
+        baitToggle.toolTip = "识别到鱼饵图标时点击，冷却 2 秒；运行中的助手下次启动时读取新开关状态。"
+        baitToggle.frame = NSRect(x: 24, y: 59, width: 104, height: 22)
+        content.addSubview(baitToggle)
+
         toggleButton = NSButton(title: "启动钓鱼助手", target: self, action: #selector(toggleAssistant))
         toggleButton.bezelStyle = .rounded
         toggleButton.controlSize = .large
-        toggleButton.frame = NSRect(x: 24, y: 55, width: 292, height: 38)
+        toggleButton.frame = NSRect(x: 136, y: 51, width: 180, height: 38)
         content.addSubview(toggleButton)
 
         let hint = NSTextField(labelWithString: "窗口置顶；齿轮图标可调整识别和点击参数")
         hint.font = .systemFont(ofSize: 11)
         hint.textColor = .secondaryLabelColor
-        hint.frame = NSRect(x: 24, y: 22, width: 292, height: 18)
+        hint.frame = NSRect(x: 24, y: 18, width: 292, height: 18)
         content.addSubview(hint)
         panel.contentView = content
+    }
+
+    @objc private func toggleBaitUsage(_ sender: NSButton) {
+        UserDefaults.standard.set(sender.state == .on, forKey: "settings.useBait")
     }
 
     @objc private func showSettings() {
@@ -135,7 +147,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
             settingFields[row.0] = field
         }
 
-        let note = NSTextField(labelWithString: "保存后下次启动生效；浮标随机量只增加延时。")
+        let note = NSTextField(labelWithString: "保存后下次启动生效；识别和点击均在本机完成。")
         note.font = .systemFont(ofSize: 11)
         note.textColor = .secondaryLabelColor
         note.frame = NSRect(x: 20, y: 68, width: 340, height: 18)
@@ -219,7 +231,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: python)
         let settings = UserDefaults.standard
-        task.arguments = [
+        var arguments = [
             script, "--start",
             "--no-bobber-interval", String(settings.double(forKey: "settings.noBobberInterval")),
             "--no-bobber-jitter", String(settings.double(forKey: "settings.noBobberJitter")),
@@ -232,6 +244,10 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
             "--bobber-loss-grace", "0.25", "--input-latency", "0.045",
             "--max-size", "1920", "--max-fps", "60", "--seconds", "3600"
         ]
+        if settings.bool(forKey: "settings.useBait") {
+            arguments += ["--use-bait", "--bait-cooldown", "2"]
+        }
+        task.arguments = arguments
         try? FileManager.default.createDirectory(
             at: URL(fileURLWithPath: logPath).deletingLastPathComponent(),
             withIntermediateDirectories: true
