@@ -92,7 +92,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
             script, "--start", "--no-bobber-interval", "1", "--no-bobber-jitter", "0.2",
             "--button-jitter", "20",
             "--hold-min-ms", "50", "--hold-max-ms", "120",
-            "--bobber-cooldown", "0.1",
+            "--bobber-cooldown", "0.3",
             "--bobber-loss-grace", "0.25", "--input-latency", "0.045",
             "--max-size", "1920", "--max-fps", "60", "--seconds", "3600"
         ]

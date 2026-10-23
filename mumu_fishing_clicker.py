@@ -213,7 +213,7 @@ def main() -> int:
     parser.add_argument("--button", nargs=2, type=int, default=(540, 1580), metavar=("X", "Y"),
                         help="button center in 1080x1920 Android coordinates")
     parser.add_argument("--margin", type=int, default=2, help="shrink detected zone by this many stream pixels")
-    parser.add_argument("--bobber-cooldown", type=float, default=0.1,
+    parser.add_argument("--bobber-cooldown", type=float, default=0.3,
                         help="minimum seconds between eligible taps while the bobber is detected")
     parser.add_argument("--interval-jitter", type=float, default=None,
                         help=argparse.SUPPRESS)
