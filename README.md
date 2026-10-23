@@ -156,6 +156,14 @@ adb devices -l
 
 GitHub 仓库的 [`windows/`](windows/README.zh-CN.md) 目录包含 Windows 启动器和试验性控制器。它是在 macOS 环境开发，尚未在 Windows + MuMu 上验证，**不保证可用性**；遇到安装、ADB 或视频流问题时，可把错误日志和环境信息交给 AI 辅助 debug。请勿附带账号、个人信息或游戏外的敏感画面。
 
+## 模拟器安装包
+
+安装包和教程放在夸克网盘，不直接提交到 Git：
+
+- [下载链接](https://pan.quark.cn/s/b3fb3d886e39)
+- 提取码：`SL57`
+- 使用方法：**仅需安装国际版可直接使用。**
+
 ## 许可
 
 本项目采用 MIT License。第三方库按各自许可单独提供；项目不打包 MuMu、ADB 或 scrcpy 的二进制文件。
